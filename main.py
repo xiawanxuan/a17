@@ -313,6 +313,150 @@ def example_5_mesh_convergence():
     return config, mesh_sizes, center_temps
 
 
+def example_6_thermal_stress():
+    """
+    示例6: 热应力耦合计算
+    计算温度场引起的热应力分布
+    """
+    print("\n" + "=" * 60)
+    print("示例6: 热应力耦合计算")
+    print("=" * 60)
+
+    config = ThermalConfig()
+    config.set_geometry(width=1.0, height=0.2, nx=40, ny=8)
+    config.set_material(
+        thermal_conductivity=100.0,
+        density=7850.0,
+        specific_heat=500.0,
+        youngs_modulus=200.0e9,
+        poissons_ratio=0.3,
+        thermal_expansion_coeff=12.0e-6,
+        reference_temperature=25.0,
+        name="steel"
+    )
+    config.clear_boundary_conditions()
+    config.add_dirichlet_bc(temperature=150.0, edge="left")
+    config.add_dirichlet_bc(temperature=25.0, edge="right")
+
+    config.clear_displacement_bcs()
+    config.add_displacement_bc(edge="left", ux=0.0, uy=0.0)
+
+    print(config.info())
+
+    mesh = generate_mesh(config, mesh_type="structured")
+    print(mesh.info())
+
+    solver = solve_thermal_problem(config, mesh)
+    print(solver.info())
+
+    print("\n求解热应力...")
+    solver.solve_thermal_stress()
+
+    von_mises = solver.get_von_mises_stress()
+    print(f"von Mises应力范围: {np.min(von_mises)/1e6:.2f} ~ {np.max(von_mises)/1e6:.2f} MPa")
+
+    ux, uy = solver.get_nodal_displacement()
+    print(f"位移范围: ux={np.min(ux)*1e3:.3f} ~ {np.max(ux)*1e3:.3f} mm")
+    print(f"          uy={np.min(uy)*1e3:.3f} ~ {np.max(uy)*1e3:.3f} mm")
+
+    visualizer = create_visualization(config, mesh, solver)
+
+    fig = plt.figure(figsize=(16, 12))
+
+    ax1 = plt.subplot(2, 2, 1)
+    visualizer.plot_temperature(ax=ax1)
+    ax1.set_title("温度场分布")
+
+    ax2 = plt.subplot(2, 2, 2)
+    visualizer.plot_von_mises_stress(ax=ax2, cmap='inferno')
+    ax2.set_title("von Mises等效应力")
+
+    ax3 = plt.subplot(2, 2, 3)
+    visualizer.plot_stress_component('x', ax=ax3, cmap='RdBu_r')
+    ax3.set_title("x方向正应力 σx")
+
+    ax4 = plt.subplot(2, 2, 4)
+    visualizer.plot_displacement('x', ax=ax4, cmap='coolwarm')
+    ax4.set_title("x方向位移 ux")
+
+    plt.suptitle("示例6: 热应力耦合计算", fontsize=14)
+    plt.tight_layout()
+
+    return config, mesh, solver, visualizer
+
+
+def example_7_transient_animation():
+    """
+    示例7: 瞬态温度场动画导出
+    支持导出为MP4/GIF格式
+    """
+    print("\n" + "=" * 60)
+    print("示例7: 瞬态温度场动画导出 (MP4/GIF)")
+    print("=" * 60)
+
+    config = ThermalConfig()
+    config.set_geometry(width=1.0, height=1.0, nx=20, ny=20)
+    config.set_material(
+        thermal_conductivity=50.0,
+        density=7850.0,
+        specific_heat=500.0,
+        youngs_modulus=200.0e9,
+        poissons_ratio=0.3,
+        thermal_expansion_coeff=12.0e-6,
+        reference_temperature=25.0,
+        name="steel"
+    )
+    config.clear_boundary_conditions()
+    config.add_dirichlet_bc(temperature=100.0, edge="left")
+    config.add_dirichlet_bc(temperature=25.0, edge="right")
+    config.add_dirichlet_bc(temperature=25.0, edge="top")
+    config.add_dirichlet_bc(temperature=25.0, edge="bottom")
+
+    config.set_solver_params(
+        steady_state=False,
+        time_step=0.02,
+        total_time=1.0,
+        initial_temp=25.0
+    )
+
+    print(config.info())
+
+    mesh = generate_mesh(config, mesh_type="structured")
+    print(mesh.info())
+
+    solver = FEMSolver(config, mesh)
+    time_points, temperature_history = solver.solve_transient()
+    solver.temperature = temperature_history[-1]
+    solver.compute_heat_flux()
+    print(f"瞬态求解完成，共 {len(time_points)} 个时间步")
+
+    visualizer = create_visualization(config, mesh, solver)
+
+    gif_path = "transient_temperature.gif"
+    print(f"\n导出GIF动画: {gif_path}")
+    visualizer.animate_transient(
+        time_points, temperature_history,
+        save_path=gif_path,
+        save_fps=15
+    )
+    print("✓ GIF动画导出成功")
+
+    mp4_path = "transient_temperature.mp4"
+    print(f"\n尝试导出MP4动画: {mp4_path}")
+    try:
+        visualizer.animate_transient(
+            time_points, temperature_history,
+            save_path=mp4_path,
+            save_fps=15
+        )
+        print("✓ MP4动画导出成功")
+    except Exception as e:
+        print(f"MP4导出需要ffmpeg支持 ({e})")
+        print("  可使用GIF格式作为替代")
+
+    return config, mesh, solver, visualizer, time_points, temperature_history
+
+
 def main():
     """主函数"""
     print("╔" + "=" * 58 + "╗")
@@ -326,6 +470,8 @@ def main():
         example_3_internal_heat_source()
         example_4_transient()
         example_5_mesh_convergence()
+        example_6_thermal_stress()
+        example_7_transient_animation()
 
         print("\n" + "=" * 60)
         print("所有示例计算完成！")

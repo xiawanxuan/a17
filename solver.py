@@ -19,6 +19,11 @@ class FEMSolver:
         self.F: Optional[np.ndarray] = None
         self.temperature: Optional[np.ndarray] = None
         self.heat_flux_elements: Optional[np.ndarray] = None
+        self.K_stress: Optional[np.ndarray] = None
+        self.F_thermal: Optional[np.ndarray] = None
+        self.displacement: Optional[np.ndarray] = None
+        self.stress_elements: Optional[np.ndarray] = None
+        self.strain_elements: Optional[np.ndarray] = None
 
     def _element_stiffness_matrix(self, elem_idx: int) -> np.ndarray:
         """计算单元刚度矩阵（传导矩阵）"""
@@ -449,7 +454,216 @@ class FEMSolver:
         if self.temperature is not None:
             info_str += f"温度范围: {np.min(self.temperature):.2f} ~ {np.max(self.temperature):.2f} °C\n"
             info_str += f"平均温度: {np.mean(self.temperature):.2f} °C\n"
+        if self.stress_elements is not None:
+            info_str += f"热应力范围: {np.min(self.stress_elements):.2e} ~ {np.max(self.stress_elements):.2e} Pa\n"
         return info_str
+
+    def _elasticity_matrix_plane_stress(self) -> np.ndarray:
+        """平面应力弹性本构矩阵 D"""
+        E = self.config.material.youngs_modulus
+        nu = self.config.material.poissons_ratio
+        D = E / (1.0 - nu ** 2) * np.array([
+            [1.0, nu, 0.0],
+            [nu, 1.0, 0.0],
+            [0.0, 0.0, (1.0 - nu) / 2.0]
+        ])
+        return D
+
+    def _element_strain_displacement_matrix(self, elem_idx: int) -> Tuple[np.ndarray, float]:
+        """单元应变-位移矩阵 B 及单元面积"""
+        n1, n2, n3 = self.mesh.elements[elem_idx]
+        x1, y1 = self.mesh.nodes[n1]
+        x2, y2 = self.mesh.nodes[n2]
+        x3, y3 = self.mesh.nodes[n3]
+
+        area = 0.5 * abs((x2 - x1) * (y3 - y1) - (x3 - x1) * (y2 - y1))
+
+        b1 = y2 - y3
+        b2 = y3 - y1
+        b3 = y1 - y2
+        c1 = x3 - x2
+        c2 = x1 - x3
+        c3 = x2 - x1
+
+        B = np.array([
+            [b1, 0.0, b2, 0.0, b3, 0.0],
+            [0.0, c1, 0.0, c2, 0.0, c3],
+            [c1, b1, c2, b2, c3, b3]
+        ]) / (2.0 * area)
+
+        return B, area
+
+    def _element_stiffness_matrix_stress(self, elem_idx: int) -> np.ndarray:
+        """单元弹性刚度矩阵（平面应力）"""
+        B, area = self._element_strain_displacement_matrix(elem_idx)
+        D = self._elasticity_matrix_plane_stress()
+        Ke = area * B.T @ D @ B
+        return Ke
+
+    def _element_thermal_load_vector(self, elem_idx: int, delta_T_avg: float) -> np.ndarray:
+        """单元热载荷向量"""
+        B, area = self._element_strain_displacement_matrix(elem_idx)
+        D = self._elasticity_matrix_plane_stress()
+        alpha = self.config.material.thermal_expansion_coeff
+        eps_thermal = alpha * delta_T_avg * np.array([1.0, 1.0, 0.0])
+        fe_thermal = area * B.T @ D @ eps_thermal
+        return fe_thermal
+
+    def _assemble_stress_stiffness_matrix(self):
+        """组装整体应力刚度矩阵"""
+        n_nodes = self.mesh.num_nodes
+        n_dof = 2 * n_nodes
+        self.K_stress = np.zeros((n_dof, n_dof))
+
+        for elem_idx in range(self.mesh.num_elements):
+            Ke = self._element_stiffness_matrix_stress(elem_idx)
+            nodes = self.mesh.elements[elem_idx]
+            dof_indices = np.zeros(6, dtype=np.int32)
+            for i, node in enumerate(nodes):
+                dof_indices[2 * i] = 2 * node
+                dof_indices[2 * i + 1] = 2 * node + 1
+            for i in range(6):
+                for j in range(6):
+                    self.K_stress[dof_indices[i], dof_indices[j]] += Ke[i, j]
+
+    def _assemble_thermal_load_vector(self):
+        """组装整体热载荷向量"""
+        if self.temperature is None:
+            raise ValueError("请先求解温度场")
+
+        n_nodes = self.mesh.num_nodes
+        n_dof = 2 * n_nodes
+        self.F_thermal = np.zeros(n_dof)
+        T_ref = self.config.material.reference_temperature
+
+        for elem_idx in range(self.mesh.num_elements):
+            nodes = self.mesh.elements[elem_idx]
+            delta_T_avg = np.mean(self.temperature[nodes]) - T_ref
+            fe = self._element_thermal_load_vector(elem_idx, delta_T_avg)
+            dof_indices = np.zeros(6, dtype=np.int32)
+            for i, node in enumerate(nodes):
+                dof_indices[2 * i] = 2 * node
+                dof_indices[2 * i + 1] = 2 * node + 1
+            for i in range(6):
+                self.F_thermal[dof_indices[i]] += fe[i]
+
+    def _apply_displacement_bcs(self, K: np.ndarray, F: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """施加位移边界条件（行修改法）"""
+        K_bc = K.copy()
+        F_bc = F.copy()
+
+        for bc in self.config.displacement_bcs:
+            edge_nodes = self.config.get_edge_nodes(self.mesh.nodes, bc.edge)
+            for node in edge_nodes:
+                if bc.ux is not None:
+                    dof_x = 2 * node
+                    K_bc[dof_x, :] = 0.0
+                    K_bc[dof_x, dof_x] = 1.0
+                    F_bc[dof_x] = bc.ux
+                if bc.uy is not None:
+                    dof_y = 2 * node + 1
+                    K_bc[dof_y, :] = 0.0
+                    K_bc[dof_y, dof_y] = 1.0
+                    F_bc[dof_y] = bc.uy
+
+        return K_bc, F_bc
+
+    def solve_thermal_stress(self) -> np.ndarray:
+        """求解热应力分布，返回节点位移向量"""
+        if self.temperature is None:
+            raise ValueError("请先求解温度场")
+
+        self._assemble_stress_stiffness_matrix()
+        self._assemble_thermal_load_vector()
+
+        K_bc, F_bc = self._apply_displacement_bcs(self.K_stress, self.F_thermal)
+
+        self.displacement = np.linalg.solve(K_bc, F_bc)
+
+        self._compute_stress_strain()
+
+        return self.displacement
+
+    def _compute_stress_strain(self):
+        """计算单元应力和应变"""
+        if self.displacement is None:
+            raise ValueError("请先求解位移场")
+
+        n_elems = self.mesh.num_elements
+        self.stress_elements = np.zeros((n_elems, 3))
+        self.strain_elements = np.zeros((n_elems, 3))
+
+        D = self._elasticity_matrix_plane_stress()
+        alpha = self.config.material.thermal_expansion_coeff
+        T_ref = self.config.material.reference_temperature
+
+        for elem_idx in range(n_elems):
+            B, _ = self._element_strain_displacement_matrix(elem_idx)
+            nodes = self.mesh.elements[elem_idx]
+
+            ue = np.zeros(6)
+            for i, node in enumerate(nodes):
+                ue[2 * i] = self.displacement[2 * node]
+                ue[2 * i + 1] = self.displacement[2 * node + 1]
+
+            eps_mech = B @ ue
+            delta_T_avg = np.mean(self.temperature[nodes]) - T_ref
+            eps_thermal = alpha * delta_T_avg * np.array([1.0, 1.0, 0.0])
+
+            self.strain_elements[elem_idx] = eps_mech
+            sigma = D @ (eps_mech - eps_thermal)
+            self.stress_elements[elem_idx] = sigma
+
+    def get_von_mises_stress(self) -> np.ndarray:
+        """获取单元von Mises等效应力"""
+        if self.stress_elements is None:
+            raise ValueError("请先求解热应力")
+
+        sx = self.stress_elements[:, 0]
+        sy = self.stress_elements[:, 1]
+        sxy = self.stress_elements[:, 2]
+        von_mises = np.sqrt(sx ** 2 - sx * sy + sy ** 2 + 3 * sxy ** 2)
+        return von_mises
+
+    def get_nodal_displacement(self) -> Tuple[np.ndarray, np.ndarray]:
+        """获取节点位移场（ux, uy）"""
+        if self.displacement is None:
+            raise ValueError("请先求解热应力")
+        ux = self.displacement[0::2]
+        uy = self.displacement[1::2]
+        return ux, uy
+
+    def get_nodal_stress(self) -> np.ndarray:
+        """获取节点应力（采用面积加权平均从单元外推到节点）"""
+        if self.stress_elements is None:
+            raise ValueError("请先求解热应力")
+
+        n_nodes = self.mesh.num_nodes
+        nodal_stress = np.zeros((n_nodes, 3))
+        nodal_area = np.zeros(n_nodes)
+
+        for elem_idx in range(self.mesh.num_elements):
+            nodes = self.mesh.elements[elem_idx]
+            _, area = self._element_strain_displacement_matrix(elem_idx)
+            stress = self.stress_elements[elem_idx]
+            for node in nodes:
+                nodal_stress[node] += stress * area / 3.0
+                nodal_area[node] += area / 3.0
+
+        for i in range(n_nodes):
+            if nodal_area[i] > 0:
+                nodal_stress[i] /= nodal_area[i]
+
+        return nodal_stress
+
+    def get_nodal_von_mises(self) -> np.ndarray:
+        """获取节点von Mises应力"""
+        nodal_stress = self.get_nodal_stress()
+        sx = nodal_stress[:, 0]
+        sy = nodal_stress[:, 1]
+        sxy = nodal_stress[:, 2]
+        von_mises = np.sqrt(sx ** 2 - sx * sy + sy ** 2 + 3 * sxy ** 2)
+        return von_mises
 
 
 def solve_thermal_problem(config: ThermalConfig, mesh: MeshGenerator) -> FEMSolver:

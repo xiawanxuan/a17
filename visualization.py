@@ -218,9 +218,16 @@ class ThermalVisualizer:
                           temperature_history: np.ndarray,
                           interval: int = 50,
                           cmap: str = 'jet',
-                          save_path: Optional[str] = None) -> FuncAnimation:
+                          save_path: Optional[str] = None,
+                          save_fps: int = 20,
+                          writer: Optional[str] = None) -> FuncAnimation:
         """
         创建瞬态温度场动画
+
+        参数:
+            save_path: 保存路径，根据扩展名自动选择格式 (.gif/.mp4)
+            save_fps: 动画帧率
+            writer: 手动指定writer ('pillow' for GIF, 'ffmpeg' for MP4)
         """
         fig, ax = plt.subplots(figsize=(10, 8))
 
@@ -248,9 +255,36 @@ class ThermalVisualizer:
                              interval=interval, blit=False)
 
         if save_path:
-            anim.save(save_path, writer='pillow', fps=20)
+            self._save_animation(anim, save_path, save_fps, writer)
 
         return anim
+
+    def _save_animation(self, anim: FuncAnimation, save_path: str,
+                        fps: int = 20, writer: Optional[str] = None):
+        """
+        保存动画，自动根据文件扩展名选择格式
+        支持: .gif (pillow), .mp4 (ffmpeg), .avi (ffmpeg)
+        """
+        if writer is None:
+            lower_path = save_path.lower()
+            if lower_path.endswith('.gif'):
+                writer = 'pillow'
+            elif lower_path.endswith('.mp4') or lower_path.endswith('.avi'):
+                writer = 'ffmpeg'
+            else:
+                writer = 'pillow'
+
+        if writer == 'ffmpeg':
+            try:
+                anim.save(save_path, writer='ffmpeg', fps=fps, dpi=100,
+                          bitrate=2000)
+            except Exception as e:
+                print(f"警告: ffmpeg导出失败 ({e})，尝试使用pillow保存为GIF")
+                gif_path = save_path.rsplit('.', 1)[0] + '.gif'
+                anim.save(gif_path, writer='pillow', fps=fps)
+                print(f"已保存为: {gif_path}")
+        else:
+            anim.save(save_path, writer='pillow', fps=fps)
 
     def plot_temperature_history(self, time_points: np.ndarray,
                                  temperature_history: np.ndarray,
@@ -322,6 +356,235 @@ class ThermalVisualizer:
     def save_figure(self, filename: str, dpi: int = 150):
         """保存当前图形"""
         plt.savefig(filename, dpi=dpi, bbox_inches='tight')
+
+    def plot_von_mises_stress(self, cmap: str = 'jet',
+                              ax: Optional[plt.Axes] = None) -> plt.Axes:
+        """绘制von Mises等效应力云图"""
+        if self.solver.stress_elements is None:
+            raise ValueError("请先求解热应力")
+
+        if ax is None:
+            _, ax = plt.subplots(figsize=(10, 8))
+
+        von_mises = self.solver.get_nodal_von_mises()
+
+        tpc = ax.tripcolor(self.triangulation, von_mises,
+                           cmap=cmap, shading='gouraud')
+        cbar = plt.colorbar(tpc, ax=ax)
+        cbar.set_label('von Mises应力 (Pa)')
+
+        ax.set_xlabel('X (m)')
+        ax.set_ylabel('Y (m)')
+        ax.set_title('von Mises等效应力分布')
+        ax.set_aspect('equal')
+
+        return ax
+
+    def plot_stress_component(self, component: str = 'x',
+                              cmap: str = 'jet',
+                              ax: Optional[plt.Axes] = None) -> plt.Axes:
+        """绘制应力分量云图
+        component: 'x' (σx), 'y' (σy), 'xy' (τxy)
+        """
+        if self.solver.stress_elements is None:
+            raise ValueError("请先求解热应力")
+
+        if ax is None:
+            _, ax = plt.subplots(figsize=(10, 8))
+
+        nodal_stress = self.solver.get_nodal_stress()
+
+        if component == 'x':
+            stress = nodal_stress[:, 0]
+            label = 'σx (Pa)'
+            title = 'x方向正应力分布'
+        elif component == 'y':
+            stress = nodal_stress[:, 1]
+            label = 'σy (Pa)'
+            title = 'y方向正应力分布'
+        elif component == 'xy':
+            stress = nodal_stress[:, 2]
+            label = 'τxy (Pa)'
+            title = '切应力分布'
+        else:
+            raise ValueError("component必须是 'x', 'y' 或 'xy'")
+
+        tpc = ax.tripcolor(self.triangulation, stress,
+                           cmap=cmap, shading='gouraud')
+        cbar = plt.colorbar(tpc, ax=ax)
+        cbar.set_label(label)
+
+        ax.set_xlabel('X (m)')
+        ax.set_ylabel('Y (m)')
+        ax.set_title(title)
+        ax.set_aspect('equal')
+
+        return ax
+
+    def plot_displacement(self, component: str = 'magnitude',
+                          cmap: str = 'jet',
+                          scale: float = 1.0,
+                          ax: Optional[plt.Axes] = None) -> plt.Axes:
+        """绘制位移分布
+        component: 'x' (ux), 'y' (uy), 'magnitude' (合位移)
+        """
+        if self.solver.displacement is None:
+            raise ValueError("请先求解热应力")
+
+        if ax is None:
+            _, ax = plt.subplots(figsize=(10, 8))
+
+        ux, uy = self.solver.get_nodal_displacement()
+
+        if component == 'x':
+            disp = ux
+            label = 'ux (m)'
+            title = 'x方向位移分布'
+        elif component == 'y':
+            disp = uy
+            label = 'uy (m)'
+            title = 'y方向位移分布'
+        elif component == 'magnitude':
+            disp = np.sqrt(ux ** 2 + uy ** 2)
+            label = '位移大小 (m)'
+            title = '总位移分布'
+        else:
+            raise ValueError("component必须是 'x', 'y' 或 'magnitude'")
+
+        tpc = ax.tripcolor(self.triangulation, disp,
+                           cmap=cmap, shading='gouraud')
+        cbar = plt.colorbar(tpc, ax=ax)
+        cbar.set_label(label)
+
+        ax.set_xlabel('X (m)')
+        ax.set_ylabel('Y (m)')
+        ax.set_title(title)
+        ax.set_aspect('equal')
+
+        return ax
+
+    def plot_deformed_shape(self, scale: float = 1.0,
+                            ax: Optional[plt.Axes] = None) -> plt.Axes:
+        """绘制变形后的网格形状"""
+        if self.solver.displacement is None:
+            raise ValueError("请先求解热应力")
+
+        if ax is None:
+            _, ax = plt.subplots(figsize=(10, 8))
+
+        ux, uy = self.solver.get_nodal_displacement()
+        deformed_nodes = self.mesh.nodes.copy()
+        deformed_nodes[:, 0] += scale * ux
+        deformed_nodes[:, 1] += scale * uy
+
+        ax.triplot(deformed_nodes[:, 0], deformed_nodes[:, 1],
+                   self.mesh.elements, 'b-', linewidth=0.5, label='变形后')
+        ax.triplot(self.mesh.nodes[:, 0], self.mesh.nodes[:, 1],
+                   self.mesh.elements, 'k--', linewidth=0.5, alpha=0.5, label='变形前')
+
+        ax.set_xlabel('X (m)')
+        ax.set_ylabel('Y (m)')
+        ax.set_title(f'变形形状 (放大系数: {scale:.0f}x)')
+        ax.set_aspect('equal')
+        ax.legend()
+
+        return ax
+
+    def plot_thermal_stress_combined(self, show_flux_vectors: bool = False):
+        """热应力分析组合视图"""
+        if self.solver.stress_elements is None:
+            raise ValueError("请先求解热应力")
+
+        fig, axes = plt.subplots(2, 2, figsize=(14, 12))
+
+        self.plot_temperature(ax=axes[0, 0])
+        axes[0, 0].set_title('温度场分布')
+
+        self.plot_von_mises_stress(ax=axes[0, 1])
+        axes[0, 1].set_title('von Mises等效应力')
+
+        self.plot_stress_component('x', ax=axes[1, 0])
+        axes[1, 0].set_title('x方向正应力 σx')
+
+        self.plot_displacement('magnitude', ax=axes[1, 1])
+        axes[1, 1].set_title('总位移分布')
+
+        plt.tight_layout()
+        return fig
+
+    def animate_thermal_stress_transient(self, time_points: np.ndarray,
+                                         temperature_history: np.ndarray,
+                                         interval: int = 50,
+                                         cmap: str = 'jet',
+                                         save_path: Optional[str] = None,
+                                         save_fps: int = 20,
+                                         writer: Optional[str] = None) -> FuncAnimation:
+        """
+        创建瞬态热应力动画（温度 + von Mises应力双面板）
+
+        注意：此函数假设温度变化缓慢，每帧都重新求解热应力。
+        对于大量时间步可能较慢。
+        """
+        fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+
+        vmin_T = np.min(temperature_history)
+        vmax_T = np.max(temperature_history)
+
+        tpc_T = axes[0].tripcolor(self.triangulation, temperature_history[0],
+                                  cmap=cmap, shading='gouraud',
+                                  vmin=vmin_T, vmax=vmax_T)
+        cbar_T = plt.colorbar(tpc_T, ax=axes[0])
+        cbar_T.set_label('温度 (°C)')
+        axes[0].set_xlabel('X (m)')
+        axes[0].set_ylabel('Y (m)')
+        axes[0].set_aspect('equal')
+        title_T = axes[0].set_title(f'温度场 - t = {time_points[0]:.4f} s')
+
+        von_mises_0 = self._compute_frame_stress(temperature_history[0])
+        vmin_S = np.min(von_mises_0)
+        vmax_S = np.max(von_mises_0)
+        for T in temperature_history:
+            vm = self._compute_frame_stress(T)
+            vmin_S = min(vmin_S, np.min(vm))
+            vmax_S = max(vmax_S, np.max(vm))
+
+        tpc_S = axes[1].tripcolor(self.triangulation, von_mises_0,
+                                  cmap=cmap, shading='gouraud',
+                                  vmin=vmin_S, vmax=vmax_S)
+        cbar_S = plt.colorbar(tpc_S, ax=axes[1])
+        cbar_S.set_label('von Mises应力 (Pa)')
+        axes[1].set_xlabel('X (m)')
+        axes[1].set_ylabel('Y (m)')
+        axes[1].set_aspect('equal')
+        title_S = axes[1].set_title(f'von Mises应力 - t = {time_points[0]:.4f} s')
+
+        def update(frame):
+            T_frame = temperature_history[frame]
+            tpc_T.set_array(T_frame)
+            title_T.set_text(f'温度场 - t = {time_points[frame]:.4f} s')
+
+            vm_frame = self._compute_frame_stress(T_frame)
+            tpc_S.set_array(vm_frame)
+            title_S.set_text(f'von Mises应力 - t = {time_points[frame]:.4f} s')
+
+            return tpc_T, tpc_S
+
+        anim = FuncAnimation(fig, update, frames=len(time_points),
+                             interval=interval, blit=False)
+
+        if save_path:
+            self._save_animation(anim, save_path, save_fps, writer)
+
+        return anim
+
+    def _compute_frame_stress(self, temperature: np.ndarray) -> np.ndarray:
+        """计算单帧温度对应的节点von Mises应力（用于动画）"""
+        old_temp = self.solver.temperature
+        self.solver.temperature = temperature
+        self.solver.solve_thermal_stress()
+        von_mises = self.solver.get_nodal_von_mises()
+        self.solver.temperature = old_temp
+        return von_mises
 
 
 def create_visualization(config: ThermalConfig, mesh: MeshGenerator,

@@ -12,10 +12,14 @@ BoundaryCondition = Union["DirichletBC", "NeumannBC", "ConvectionBC"]
 
 @dataclass
 class MaterialProperties:
-    """材料热物性参数"""
+    """材料热物性参数与力学参数"""
     thermal_conductivity: float = 100.0
     density: float = 7850.0
     specific_heat: float = 500.0
+    youngs_modulus: float = 200.0e9
+    poissons_ratio: float = 0.3
+    thermal_expansion_coeff: float = 12.0e-6
+    reference_temperature: float = 25.0
     name: str = "steel"
 
     def thermal_diffusivity(self) -> float:
@@ -57,6 +61,15 @@ class ConvectionBC:
 
 
 @dataclass
+class DisplacementBC:
+    """位移边界条件（用于热应力计算）"""
+    edge: str
+    ux: Optional[float] = None
+    uy: Optional[float] = None
+    bc_type: str = "displacement"
+
+
+@dataclass
 class HeatSource:
     """内热源配置"""
     magnitude: float
@@ -82,8 +95,10 @@ class ThermalConfig:
         self.geometry = GeometryConfig()
         self.solver = SolverConfig()
         self.boundary_conditions: List[BoundaryCondition] = []
+        self.displacement_bcs: List[DisplacementBC] = []
         self.heat_sources: List[HeatSource] = []
         self._setup_default_bcs()
+        self._setup_default_disp_bcs()
 
     def _setup_default_bcs(self):
         """设置默认边界条件"""
@@ -92,13 +107,26 @@ class ThermalConfig:
             DirichletBC(temperature=25.0, edge="right"),
         ]
 
+    def _setup_default_disp_bcs(self):
+        """设置默认位移边界条件（左下固定，其他自由）"""
+        self.displacement_bcs = [
+            DisplacementBC(ux=0.0, uy=0.0, edge="left"),
+        ]
+
     def set_material(self, thermal_conductivity: float, density: float,
-                     specific_heat: float, name: str = "custom"):
+                     specific_heat: float, name: str = "custom",
+                     youngs_modulus: float = 200.0e9, poissons_ratio: float = 0.3,
+                     thermal_expansion_coeff: float = 12.0e-6,
+                     reference_temperature: float = 25.0):
         """设置材料参数"""
         self.material = MaterialProperties(
             thermal_conductivity=thermal_conductivity,
             density=density,
             specific_heat=specific_heat,
+            youngs_modulus=youngs_modulus,
+            poissons_ratio=poissons_ratio,
+            thermal_expansion_coeff=thermal_expansion_coeff,
+            reference_temperature=reference_temperature,
             name=name
         )
 
@@ -159,6 +187,22 @@ class ThermalConfig:
     def clear_heat_sources(self):
         """清除所有热源"""
         self.heat_sources = []
+
+    def add_displacement_bc(self, edge: str, ux: Optional[float] = None,
+                            uy: Optional[float] = None):
+        """添加位移边界条件（用于热应力计算）"""
+        valid_edges = ["left", "right", "top", "bottom"]
+        if edge not in valid_edges:
+            raise ValueError(f"边必须是以下之一: {valid_edges}")
+        if ux is None and uy is None:
+            raise ValueError("至少需要指定ux或uy中的一个")
+        self.displacement_bcs.append(
+            DisplacementBC(ux=ux, uy=uy, edge=edge)
+        )
+
+    def clear_displacement_bcs(self):
+        """清除所有位移边界条件"""
+        self.displacement_bcs = []
 
     def get_edge_nodes(self, nodes: np.ndarray, edge: str) -> np.ndarray:
         """获取指定边上的节点索引"""
